@@ -1,0 +1,20 @@
+// TTN Console -> Payload formatters -> Uplink -> Custom JavaScript formatter
+// Paste this in directly.
+
+function decodeUplink(input) {
+  const bytes = input.bytes;
+
+  let temp = (bytes[0] << 8) | bytes[1];
+
+  // Convert from unsigned to signed int16
+  if (temp & 0x8000) {
+    temp -= 0x10000;
+  }
+
+  return {
+    data: {
+      temperature: temp / 100.0,
+      door_open: bytes[2] === 1
+    }
+  };
+}
