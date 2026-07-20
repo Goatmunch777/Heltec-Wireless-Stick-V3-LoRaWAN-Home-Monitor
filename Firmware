@@ -1,0 +1,186 @@
+/*
+ * Home Monitor - Heltec Wireless Stick V3
+ * LoRaWAN via The Things Network (TTN)
+ *
+ * Sends:
+ *   - Temperature + door state every hour
+ *   - Door state immediately on change
+ *
+ * Payload:
+ *   Byte 0: Temperature MSB (signed int16, C x100)
+ *   Byte 1: Temperature LSB
+ *   Byte 2: Door state (0 = closed, 1 = open)
+ */
+
+#define HELTEC_WIRELESS_STICK
+
+#include <heltec_unofficial.h>
+#include <RadioLib.h>
+#include <LoRaWAN_ESP32.h>
+
+// ---------------- USER CONFIG ----------------
+
+#define DOOR_PIN        7
+#define DOOR_OPEN_LEVEL HIGH
+
+const uint32_t HOURLY_INTERVAL_MS = 60UL * 60UL * 1000UL;
+const uint32_t DEBOUNCE_MS        = 300;
+
+// ---------------- LoRaWAN ----------------
+
+LoRaWANNode* node;
+
+// ---------------- State ----------------
+
+volatile bool doorChanged = false;
+
+bool lastDoorState = false;
+
+uint32_t lastHourlySend = 0;
+uint32_t lastDebounceTime = 0;
+
+// ---------------- Interrupt ----------------
+
+void IRAM_ATTR onDoorChange() {
+  doorChanged = true;
+}
+
+// ---------------- Payload ----------------
+
+void buildPayload(uint8_t* buf, float tempC, bool doorOpen) {
+
+  int16_t temp = (int16_t)(tempC * 100.0f);
+
+  buf[0] = highByte(temp);
+  buf[1] = lowByte(temp);
+  buf[2] = doorOpen ? 1 : 0;
+}
+
+// ---------------- Uplink ----------------
+
+void sendUplink(const char* reason) {
+
+  if (!node || !node->isActivated()) {
+    both.println("LoRaWAN not connected.");
+    return;
+  }
+
+  float tempC = heltec_temperature();
+
+  bool doorOpen =
+      (digitalRead(DOOR_PIN) == DOOR_OPEN_LEVEL);
+
+  uint8_t payload[3];
+
+  buildPayload(payload, tempC, doorOpen);
+
+  both.printf(
+      "Uplink (%s): %.2f C  Door: %s\n",
+      reason,
+      tempC,
+      doorOpen ? "OPEN" : "CLOSED");
+
+  int state = node->sendReceive(payload, sizeof(payload));
+
+  if (state == RADIOLIB_ERR_NONE || state > 0) {
+    both.println("Uplink sent OK");
+  }
+  else {
+    both.printf("Uplink failed, code %d\n", state);
+  }
+
+  lastDoorState = doorOpen;
+}
+
+// ---------------- Setup ----------------
+
+void setup() {
+
+  heltec_setup();
+
+  both.println("Home Monitor booting...");
+
+  pinMode(DOOR_PIN, INPUT_PULLUP);
+
+  attachInterrupt(
+      digitalPinToInterrupt(DOOR_PIN),
+      onDoorChange,
+      CHANGE);
+
+  both.print("Radio init: ");
+
+  int state = radio.begin();
+
+  if (state != RADIOLIB_ERR_NONE) {
+
+    both.printf("failed, code %d\n", state);
+
+    while (true) {
+      heltec_loop();
+    }
+  }
+
+  both.println("OK");
+
+  both.println("Starting LoRaWAN persist manager...");
+
+  node = persist.manage(&radio);
+
+  if (!node->isActivated()) {
+
+    both.println(
+        "Could not join network. Check credentials or gateway.");
+
+  } else {
+
+    both.println("Joined TTN");
+  }
+
+  lastDoorState =
+      (digitalRead(DOOR_PIN) == DOOR_OPEN_LEVEL);
+
+  lastHourlySend = millis();
+
+  sendUplink("boot");
+}
+
+// ---------------- Loop ----------------
+
+void loop() {
+
+  heltec_loop();
+
+  uint32_t now = millis();
+
+  // Hourly report
+
+  if (now - lastHourlySend >= HOURLY_INTERVAL_MS) {
+
+    sendUplink("hourly");
+
+    lastHourlySend += HOURLY_INTERVAL_MS;
+  }
+
+  // Door event
+
+  if (doorChanged) {
+
+    doorChanged = false;
+
+    if (millis() - lastDebounceTime >= DEBOUNCE_MS) {
+
+      lastDebounceTime = millis();
+
+      bool doorOpen =
+          (digitalRead(DOOR_PIN) == DOOR_OPEN_LEVEL);
+
+      if (doorOpen != lastDoorState) {
+
+        sendUplink(
+            doorOpen ?
+            "door_open" :
+            "door_closed");
+      }
+    }
+  }
+}
